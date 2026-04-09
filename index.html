@@ -65,4 +65,239 @@ h2 { font-size: 13px; font-weight: 600; color: #555; text-transform: uppercase; 
 .log-qty  { font-weight: 600; color: #111; }
 .log-stock{ color: #888; }
 .info-block { margin-bottom: 20px; }
-.info-block h2
+.info-block h2 { margin-bottom: 8px; }
+.info-row  { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #ebebeb; font-size: 13px; }
+.info-row:last-child { border-bottom: none; }
+.info-row .k { color: #666; }
+.info-row .v { font-weight: 600; }
+.rec-box { border: 1px solid #e5e5e5; border-radius: 8px; padding: 14px; background: #fff; margin-bottom: 16px; }
+.rec-box .rec-label { font-size: 12px; color: #888; margin-bottom: 6px; }
+.rec-val { font-size: 28px; font-weight: 700; color: #111; }
+.rec-unit { font-size: 13px; color: #666; margin-top: 4px; }
+.placeholder { display: flex; align-items: center; justify-content: center; height: 200px; color: #aaa; font-size: 13px; }
+#event-log { font-size: 12px; color: #555; }
+.ev { padding: 4px 0; border-bottom: 1px solid #ebebeb; display: flex; gap: 8px; }
+.ev:last-child { border-bottom: none; }
+.ev-t { color: #bbb; flex-shrink: 0; }
+.ev-m { flex: 1; }
+.ev-m.order { color: #16a34a; font-weight: 600; }
+.ev-m.err   { color: #dc2626; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+@media(max-width:760px) { .page { grid-template-columns: 1fr; } .sidebar { border-top: 1px solid #e5e5e5; } }
+</style>
+</head>
+<body>
+<div class="bar">
+  <span class="status-dot" id="dot"></span>
+  <input type="text" id="url-in" placeholder="https://www.imini.tv/xingjunwenhua/wap_pro/58867721.html" />
+  <label>每 <input type="number" id="itvl" value="3" min="1" max="60"> 秒</label>
+  <button class="primary" id="tog" onclick="toggle()">开始</button>
+  <button onclick="resetAll()">重置</button>
+  <span class="cd" id="cd"></span>
+</div>
+<div class="page">
+  <div class="main" id="main">
+    <div class="placeholder" id="placeholder">输入链接后点击"开始"</div>
+  </div>
+  <div class="sidebar">
+    <div class="info-block" id="rec-block" style="display:none">
+      <h2>建议购买量</h2>
+      <div class="rec-box">
+        <div class="rec-label">众数（最常见的单笔下单量）</div>
+        <div class="rec-val" id="rec-mode">—</div>
+        <div class="rec-unit">件 / 单</div>
+      </div>
+      <div class="rec-box">
+        <div class="rec-label">平均单笔下单量</div>
+        <div class="rec-val" id="rec-avg">—</div>
+        <div class="rec-unit">件 / 单</div>
+      </div>
+    </div>
+    <div class="info-block">
+      <h2>商品信息</h2>
+      <div id="prod-info"><div style="color:#aaa;font-size:12px">等待数据...</div></div>
+    </div>
+    <div class="info-block">
+      <h2>运行日志</h2>
+      <div id="event-log">
+        <div class="ev"><span class="ev-t">--:--:--</span><span class="ev-m">等待开始</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const API = 'https://www.imini.tv/mallorder/api/specinfo.php';
+const S = { running:false, timer:null, rounds:0, skus:{}, proName:'', proId:'', username:'' };
+const $ = id => document.getElementById(id);
+const ts = () => new Date().toLocaleTimeString('zh-CN',{hour12:false});
+function evlog(msg,type=''){
+  const el=$('event-log');
+  const ph=el.querySelector('.ev-m');
+  if(ph&&ph.textContent==='等待开始') el.innerHTML='';
+  const d=document.createElement('div'); d.className='ev';
+  d.innerHTML=`<span class="ev-t">${ts()}</span><span class="ev-m ${type}">${msg}</span>`;
+  el.insertBefore(d,el.firstChild);
+  while(el.children.length>80) el.removeChild(el.lastChild);
+}
+function parseUrl(url){
+  const m=url.match(/imini\.tv\/([^\/]+)\/wap_pro\/(\d+)\.html/);
+  if(m) return{username:m[1],proId:m[2]};
+  const m2=url.match(/\/(\d+)\.html/);
+  if(m2) return{username:'',proId:m2[1]};
+  return null;
+}
+async function callApi(username,proId,channelId=''){
+  const body=`username=${encodeURIComponent(username)}&pro_id=${encodeURIComponent(proId)}&channel_id=${encodeURIComponent(channelId)}&regionCode=`;
+  const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+function toggle(){
+  S.running=!S.running;
+  const btn=$('tog'),dot=$('dot');
+  if(S.running){
+    btn.textContent='停止'; btn.className='danger';
+    dot.classList.add('live');
+    const info=parseUrl($('url-in').value.trim());
+    if(!info){alert('无法解析链接');S.running=false;return;}
+    S.username=info.username; S.proId=info.proId;
+    $('url-in').disabled=true;
+    evlog('开始监控'); doFetch(); startTick();
+  } else {
+    btn.textContent='开始'; btn.className='primary';
+    dot.classList.remove('live');
+    clearInterval(S.timer); S.timer=null;
+    $('cd').textContent=''; $('url-in').disabled=false;
+    evlog('已停止');
+  }
+}
+function startTick(){
+  let left=parseInt($('itvl').value)||3; $('cd').textContent=left+'s';
+  clearInterval(S.timer);
+  S.timer=setInterval(()=>{
+    if(!S.running) return;
+    left--; $('cd').textContent=left+'s';
+    if(left<=0){left=parseInt($('itvl').value)||3; doFetch();}
+  },1000);
+}
+async function doFetch(){
+  S.rounds++;
+  try{
+    const data=await callApi(S.username,S.proId);
+    if(data.code!=='200'){evlog(`API错误: code=${data.code}`,'err');return;}
+    processData(data);
+  }catch(e){
+    evlog(`请求失败: ${e.message}`,'err');
+    if(e.message.includes('Failed to fetch')||e.message.includes('Load failed')){
+      evlog('CORS限制，请改用 python3 server.py','err'); toggle();
+    }
+  }
+}
+function processData(data){
+  S.proName=data.pro_name||'';
+  $('prod-info').innerHTML=`
+    <div class="info-row"><span class="k">商品名</span><span class="v" style="max-width:180px;text-align:right;font-size:12px">${S.proName}</span></div>
+    <div class="info-row"><span class="k">单价</span><span class="v">¥${data.pro_price}</span></div>
+    <div class="info-row"><span class="k">检测轮次</span><span class="v">${S.rounds}</span></div>`;
+  const proSpec=data.pro_spec||{};
+  let skuArr=[];
+  if(Object.keys(proSpec).length>0){
+    for(const[pid,spec] of Object.entries(proSpec))
+      skuArr.push({skuId:spec.id||pid,name:spec.name||pid,price:spec.pro_price,stock:parseInt(spec.pro_stock)||0,pic:spec.pro_pic||''});
+  } else {
+    skuArr.push({skuId:data.pro_id,name:data.pro_name||data.pro_id,price:data.pro_price,stock:parseInt(data.pro_stock)||0,pic:data.pro_pic||''});
+  }
+  for(const sku of skuArr){
+    const ex=S.skus[sku.skuId];
+    if(!ex){
+      S.skus[sku.skuId]={...sku,prevStock:sku.stock,orders:[]};
+      evlog(`发现 ${sku.name}，库存 ${sku.stock}`);
+    } else {
+      ex.prevStock=ex.stock; ex.stock=sku.stock;
+      const diff=ex.prevStock-ex.stock;
+      if(diff>0){ ex.orders.push({time:ts(),qty:diff,stockBefore:ex.prevStock,stockAfter:ex.stock}); beep(); evlog(`${sku.name}  -${diff}件  (${ex.prevStock}→${ex.stock})`,'order'); }
+      else if(diff<0){ evlog(`${sku.name} 补货 +${-diff}`); }
+    }
+  }
+  renderMain(skuArr); updateGlobalRec();
+}
+function renderMain(skuArr){
+  const main=$('main');
+  const ph=$('placeholder'); if(ph) ph.style.display='none';
+  let html='';
+  for(const sku of skuArr){ const st=S.skus[sku.skuId]; if(st) html+=renderSkuCard(st); }
+  main.innerHTML=html;
+}
+function renderSkuCard(st){
+  let sc,sl;
+  if(st.stock<0){sc='stock-unk';sl='未知';}
+  else if(st.stock===0){sc='stock-zero';sl='缺货';}
+  else if(st.stock<=20){sc='stock-low';sl=st.stock+' 件';}
+  else{sc='stock-ok';sl=st.stock+' 件';}
+  const orders=st.orders, n=orders.length;
+  const totalQty=orders.reduce((s,o)=>s+o.qty,0);
+  const avgQty=n>0?(totalQty/n).toFixed(1):'—';
+  const lastQty=n>0?orders[n-1].qty:'—';
+  const modeQty=calcMode(orders.map(o=>o.qty));
+  const dist=buildDist(orders.map(o=>o.qty));
+  const maxPct=dist.length?dist[0].pct:1;
+  const distRows=dist.map(d=>`<tr class="${d.qty===modeQty?'mode-row':''}"><td><strong>${d.qty}</strong> 件/单</td><td>${d.count} 次</td><td><div class="dist-bar-wrap"><div class="dist-bar" style="width:${Math.round(d.pct/maxPct*120)}px"></div><span class="pct">${d.pct}%</span></div></td></tr>`).join('');
+  const recentOrders=[...orders].reverse().slice(0,10);
+  const logRows=recentOrders.map(o=>`<div class="log-item"><span class="log-time">${o.time}</span><span class="log-qty">-${o.qty} 件</span><span class="log-stock">${o.stockBefore} → ${o.stockAfter}</span></div>`).join('');
+  const picHtml=st.pic?`<img class="sku-pic" src="${st.pic}" onerror="this.style.display='none'">`:`<div class="sku-pic"></div>`;
+  return `<div class="sku-card">
+  <div class="sku-head">${picHtml}<div class="sku-title"><div class="sku-name">${st.name}</div><div class="sku-sub">¥${st.price||'—'}</div></div><span class="sku-stock-badge ${sc}">${sl}</span></div>
+  <div class="sku-stats">
+    <div class="stat-cell"><div class="val val-orders">${n}</div><div class="lbl">检测到下单次数</div></div>
+    <div class="stat-cell"><div class="val val-avg">${avgQty}</div><div class="lbl">平均每单件数</div></div>
+    <div class="stat-cell"><div class="val val-mode">${modeQty!==null?modeQty:'—'}</div><div class="lbl">最常见每单件数</div></div>
+    <div class="stat-cell"><div class="val val-last">${lastQty}</div><div class="lbl">最新一单件数</div></div>
+  </div>
+  ${dist.length>0?`<div class="dist-wrap"><h3>每单件数分布</h3><table class="dist-table"><thead><tr><th>件数/单</th><th>出现次数</th><th>占比</th></tr></thead><tbody>${distRows}</tbody></table></div>`:''}
+  ${n>0?`<div class="order-log"><h3>下单记录（最近 ${Math.min(n,10)} 条）</h3><div class="log-list">${logRows}</div></div>`:''}
+</div>`;
+}
+function calcMode(arr){
+  if(!arr.length) return null;
+  const freq={};
+  for(const v of arr) freq[v]=(freq[v]||0)+1;
+  return parseInt(Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0]);
+}
+function buildDist(arr){
+  if(!arr.length) return [];
+  const freq={};
+  for(const v of arr) freq[v]=(freq[v]||0)+1;
+  const total=arr.length;
+  return Object.entries(freq).map(([qty,count])=>({qty:parseInt(qty),count,pct:Math.round(count/total*100)})).sort((a,b)=>b.count-a.count);
+}
+function updateGlobalRec(){
+  const all=Object.values(S.skus).flatMap(s=>s.orders.map(o=>o.qty));
+  if(!all.length) return;
+  const mode=calcMode(all);
+  const avg=(all.reduce((a,b)=>a+b,0)/all.length).toFixed(1);
+  $('rec-mode').textContent=mode??'—'; $('rec-avg').textContent=avg;
+  $('rec-block').style.display='block';
+}
+function resetAll(){
+  S.skus={}; S.rounds=0; S.proName='';
+  $('main').innerHTML='<div class="placeholder" id="placeholder">输入链接后点击"开始"</div>';
+  $('prod-info').innerHTML='<div style="color:#aaa;font-size:12px">等待数据...</div>';
+  $('rec-block').style.display='none';
+  $('event-log').innerHTML=`<div class="ev"><span class="ev-t">${ts()}</span><span class="ev-m">已重置</span></div>`;
+}
+function beep(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type='sine'; o.frequency.value=900;
+    g.gain.setValueAtTime(0.2,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);
+    o.start(); o.stop(ctx.currentTime+0.3);
+  }catch(e){}
+}
+window.onload=()=>{ $('url-in').value='https://www.imini.tv/xingjunwenhua/wap_pro/58867721.html'; };
+</script>
+</body>
+</html>
